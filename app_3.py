@@ -116,7 +116,7 @@ DEFAULT_ORDER_STATUSES = [
 EXPECTED_COLUMNS = [
     "Date", "Month", "Name", "Region", "TIM#", "CM", "Parameters",
     "MG Lines", "Oversold Lines", "Set line", "Total MGL $", "Order Type",
-    "Order Staus", "Reason", "Quality Met",
+    "Order Status", "Reason", "Quality Met",
     "Error Type", "Error Comments", "TAT Miss", "Feedback Delivered by", "Year",
 ]
 
@@ -193,16 +193,16 @@ def get_date_info():
     IST   = ZoneInfo("Asia/Kolkata")
     today  = datetime.now(IST)
     target = today - timedelta(days=1)
-    date_str  = target.strftime("%d-%b-%Y")
+    date_str  = f"{target.month}/{target.day}/{target.year}"
     year      = target.year
 
     # Month rule: if today is the 1st, use previous month
     if today.day == 1:
         first_of_month = today.replace(day=1)
         prev_month     = first_of_month - timedelta(days=1)
-        month_str      = prev_month.strftime("%B")
+        month_str      = prev_month.strftime("%b")
     else:
-        month_str = target.strftime("%B")
+        month_str = target.strftime("%b")
 
     return date_str, month_str, year
 
@@ -220,8 +220,9 @@ def clean_tracker(raw_df: pd.DataFrame,
                   threshold: int = FUZZY_THRESHOLD):
     """
     Returns:
-        df          – cleaned DataFrame
-        red_cells   – set of (row_index, col_name) to highlight red
+        df           – cleaned DataFrame
+        red_cells    – set of (row_index, col_name) to highlight red
+        invalid_df   – DataFrame of rows that were dropped (Invalid Data)
     """
     date_str, month_str, current_year = get_date_info()
 
@@ -391,11 +392,11 @@ def clean_tracker(raw_df: pd.DataFrame,
             return (matched, False)
         return (str(val).strip(), True)
 
-    os_results        = df["Order Staus"].apply(clean_status)
-    df["Order Staus"] = os_results.apply(lambda x: x[0])
+    os_results        = df["Order Status"].apply(clean_status)
+    df["Order Status"] = os_results.apply(lambda x: x[0])
     for i, (_, red) in enumerate(os_results):
         if red:
-            red_cells.add((i, "Order Staus"))
+            red_cells.add((i, "Order Status"))
 
     # ── 13. REASON ───────────────────────────────────────────────────────────
     df["Reason"] = df["Reason"].apply(
@@ -419,9 +420,9 @@ def clean_tracker(raw_df: pd.DataFrame,
     df["Year"] = current_year
 
     # ── 19. DROP rows where key columns are "-" or red-flagged ─────────────
-    #    Drop any row where Name, Region, TIM#, CM, Order Type, or Order Staus
+    #    Drop any row where Name, Region, TIM#, CM, Order Type, or Order Status
     #    contains "-" (empty/unresolved) OR is red-flagged (unrecognised value).
-    DROP_COLS = {"Name", "Region", "TIM#", "CM", "Order Type", "Order Staus"}
+    DROP_COLS = {"Name", "Region", "TIM#", "CM", "Order Type", "Order Status"}
 
     # Row indices that have a red cell in any of the key columns
     red_row_indices = {r for (r, c) in red_cells if c in DROP_COLS}
@@ -437,6 +438,10 @@ def clean_tracker(raw_df: pd.DataFrame,
     drop_mask       = pd.Series([should_drop(i, row) for i, row in df.iterrows()],
                                  index=df.index)
     dropped_indices = set(df.index[drop_mask].tolist())
+
+    # Capture the removed/invalid rows before dropping them from df
+    invalid_df = df[drop_mask].copy().reset_index(drop=True)
+
     df              = df[~drop_mask].reset_index(drop=True)
 
     # Remap red_cell row indices after dropping rows
@@ -447,7 +452,7 @@ def clean_tracker(raw_df: pd.DataFrame,
             new_red_cells.add((new_row, col))
     red_cells = new_red_cells
 
-    return df, red_cells
+    return df, red_cells, invalid_df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -524,10 +529,10 @@ def build_order_type_data(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_order_status_data(df: pd.DataFrame) -> pd.DataFrame:
     """Order Status | Count"""
-    os_df = df[df["Order Staus"] != "-"].copy()
+    os_df = df[df["Order Status"] != "-"].copy()
     grouped = (
-        os_df.groupby("Order Staus", as_index=False)
-        .agg(**{"Count": ("Order Staus", "count")})
+        os_df.groupby("Order Status", as_index=False)
+        .agg(**{"Count": ("Order Status", "count")})
         .sort_values("Count", ascending=False)
         .reset_index(drop=True)
     )
@@ -535,11 +540,12 @@ def build_order_status_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  EXCEL EXPORT  — 3 sheets: cleaned data + pivot + charts
+#  EXCEL EXPORT  — 4 sheets: cleaned data + pivot + charts + invalid data
 # ══════════════════════════════════════════════════════════════════════════════
 
 def to_excel_bytes(df: pd.DataFrame, red_cells: set,
-                   pivot: pd.DataFrame, tracker_sheet_name: str) -> bytes:
+                   pivot: pd.DataFrame, tracker_sheet_name: str,
+                   invalid_df: pd.DataFrame = None) -> bytes:
     from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
     from openpyxl.chart import BarChart, Reference
@@ -863,7 +869,7 @@ def to_excel_bytes(df: pd.DataFrame, red_cells: set,
         # ──────────────────────────────────────────────────────────────────────
         os_data  = build_order_status_data(df)
         os_start = ot_end_row + 3
-        os_rows  = [(r["Order Staus"], int(r["Count"])) for _, r in os_data.iterrows()]
+        os_rows  = [(r["Order Status"], int(r["Count"])) for _, r in os_data.iterrows()]
         os_hdr_row, os_end_row, os_sc, os_ec = write_table(
             wc, start_row=os_start, start_col=1,
             headers=["Order Status", "Count"],
@@ -899,6 +905,46 @@ def to_excel_bytes(df: pd.DataFrame, red_cells: set,
         # ── Charts sheet cosmetics ────────────────────────────────────────────
         wc.sheet_view.showGridLines = False
         wc.sheet_properties.tabColor = "1F3864"
+
+        # ── Sheet 4 : Invalid Data (rows removed during cleaning) ───────────
+        if invalid_df is None:
+            invalid_df = pd.DataFrame(columns=EXPECTED_COLUMNS)
+
+        invalid_df.to_excel(writer, index=False, sheet_name="Invalid Data")
+        wi = writer.sheets["Invalid Data"]
+
+        inv_hdr_fill = PatternFill("solid", fgColor="7A1F1F")
+        inv_hdr_font = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
+        inv_alt      = PatternFill("solid", fgColor="FDEDED")
+        inv_wht      = PatternFill("solid", fgColor="FFFFFF")
+
+        for cell in wi[1]:
+            cell.fill      = inv_hdr_fill
+            cell.font      = inv_hdr_font
+            cell.alignment = Alignment(horizontal="center", vertical="center",
+                                       wrap_text=True)
+            cell.border    = border
+
+        for row_idx, row in enumerate(wi.iter_rows(min_row=2), start=2):
+            base_fill = inv_alt if row_idx % 2 == 0 else inv_wht
+            for cell in row:
+                cell.fill      = base_fill
+                cell.font      = Font(name="Calibri", size=10)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border    = border
+
+        for col_cells in wi.columns:
+            max_len = max(
+                (len(str(c.value)) if c.value is not None else 0 for c in col_cells),
+                default=10,
+            )
+            wi.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = min(max_len + 4, 32)
+
+        wi.row_dimensions[1].height = 34
+        wi.freeze_panes = "A2"
+        wi.sheet_properties.tabColor = "7A1F1F"
 
     return output.getvalue()
 
@@ -1038,8 +1084,8 @@ st.markdown("""
 
 # ── Computed date info ────────────────────────────────────────────────────────
 date_str, month_str, current_year = get_date_info()
-output_filename   = f"MG Daily Tracker ({date_str}).xlsx"
-tracker_tab_name  = f"MG Daily Tracker {date_str}"
+output_filename   = f"MG Daily Tracker ({date_str.replace('/', '-')}).xlsx"
+tracker_tab_name  = f"MG Daily Tracker {date_str.replace('/', '-')}"
 
 # ── Step 1 : Upload ───────────────────────────────────────────────────────────
 st.markdown("""
@@ -1056,8 +1102,8 @@ uploaded_file = st.file_uploader("", type=["xlsx", "xls"], label_visibility="col
 with st.expander("📋 Cleaning rules reference"):
     st.markdown("""
     <div class="rules-wrap">
-      <div class="rule-pill"><b>Date</b>Always set to current date − 1 (DD-Mon-YYYY)</div>
-      <div class="rule-pill"><b>Month</b>Current month; if today = 1st → previous month</div>
+      <div class="rule-pill"><b>Date</b>Always set to current date − 1 (M/D/YYYY)</div>
+      <div class="rule-pill"><b>Month</b>Current month, short form (Jan, Feb…); if today = 1st → previous month</div>
       <div class="rule-pill"><b>Name</b>Fuzzy-matched to list · empty → "-" · unknown → 🔴 red</div>
       <div class="rule-pill"><b>Region</b>Fuzzy-matched to list · empty → "-" · unknown → 🔴 red</div>
       <div class="rule-pill"><b>TIM#</b>Strip spaces · digits only · empty → "-" · text → 🔴 red</div>
@@ -1074,6 +1120,7 @@ with st.expander("📋 Cleaning rules reference"):
       <div class="rule-pill"><b>TAT Miss</b>Always → No</div>
       <div class="rule-pill"><b>Feedback Delivered by</b>Always → -</div>
       <div class="rule-pill"><b>Year</b>Always current year</div>
+      <div class="rule-pill"><b>Invalid Data</b>Rows dropped during cleaning are saved to a separate sheet</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1136,7 +1183,7 @@ if uploaded_file:
 
         if st.button("🧹  Clean Tracker", use_container_width=True, type="primary"):
             with st.spinner("Applying cleaning rules…"):
-                cleaned_df, red_cells = clean_tracker(
+                cleaned_df, red_cells, invalid_df = clean_tracker(
                     raw_df.copy(),
                     valid_names=valid_names,
                     valid_regions=valid_regions,
@@ -1146,7 +1193,8 @@ if uploaded_file:
                 )
                 pivot_df    = build_pivot(cleaned_df)
                 excel_bytes = to_excel_bytes(
-                    cleaned_df, red_cells, pivot_df, tracker_tab_name
+                    cleaned_df, red_cells, pivot_df, tracker_tab_name,
+                    invalid_df=invalid_df,
                 )
 
             red_count = len(red_cells)
@@ -1169,6 +1217,10 @@ if uploaded_file:
             with st.expander("👁 Preview pivot table"):
                 st.dataframe(pivot_df, use_container_width=True, hide_index=True)
 
+            if len(invalid_df) > 0:
+                with st.expander(f"👁 Preview Invalid Data ({len(invalid_df):,} row(s) removed)"):
+                    st.dataframe(invalid_df, use_container_width=True)
+
             st.markdown('<hr class="hdiv">', unsafe_allow_html=True)
 
             st.markdown("""
@@ -1176,8 +1228,9 @@ if uploaded_file:
               <div class="step-num">Step 03</div>
               <div class="card-title">Download Cleaned Tracker</div>
               <div class="card-desc">
-                Three sheets inside: <b>Cleaned Data</b> · <b>Pivot</b> · <b>Charts</b>.<br>
-                Red cells = values the cleaner could not confidently correct — fill those manually.
+                Four sheets inside: <b>Cleaned Data</b> · <b>Pivot</b> · <b>Charts</b> · <b>Invalid Data</b>.<br>
+                Red cells = values the cleaner could not confidently correct — fill those manually.<br>
+                The <b>Invalid Data</b> sheet holds rows removed during cleaning (missing/unrecognised key fields).
               </div>
             </div>
             """, unsafe_allow_html=True)
