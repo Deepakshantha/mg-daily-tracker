@@ -75,7 +75,7 @@ DEFAULT_NAMES = [
     "Samyuktha Balakrishnaian",
     "Saquib Tanweer",
     "Sarathirajan K",
-    "SarathKumar Ravikumar",
+    "Sarath Kumar Ravikumar",
     "Sathish Kumar Venkatesan",
     "Shalini S",
     "Shalini Subramanian",
